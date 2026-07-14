@@ -1,0 +1,711 @@
+"""
+Railway_PivotAnalysis_15Q.xlsx — Full Builder Script
+=====================================================
+Rebuilds the full 15-question pivot-style analysis workbook from the
+raw railway journeys dataset (one row per ticket), using pandas for
+every calculation and openpyxl only for layout/formatting.
+
+No Excel PivotTable objects are used anywhere — every number is
+computed once in pandas and written as a plain value, then styled by
+hand (title bar, header row, merged cells, notes, emoji labels) so the
+sheet reads like an analyst manually built it in Excel.
+
+INPUT : a CSV with (at least) these columns —
+    Transaction ID, Date of Purchase, Purchase Day, Purchase Type,
+    Payment Method, Railcard, Ticket Class, Ticket Type, Price,
+    Departure Station, Arrival Destination, Date of Journey,
+    Journey Day, Month, Departure Time, Journey Status,
+    Time Delay(Minutes), Reason for Delay, Refund Request
+OUTPUT: Railway_PivotAnalysis_15Q.xlsx  (16 sheets: Data + Q1..Q15)
+"""
+
+import pandas as pd
+import numpy as np
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
+
+TITLE_FILL    = PatternFill("solid", fgColor="C55A11")
+HEADER_FILL   = PatternFill("solid", fgColor="1F3864")
+TITLE_FONT    = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+SUBTITLE_FONT = Font(name="Arial", size=10, italic=True, color="FFFFFF")
+HEADER_FONT   = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+LABEL_FONT    = Font(name="Arial", size=11, bold=True, color="1F3864")
+NOTE_FONT     = Font(name="Arial", size=9, italic=True, color="7F7F7F")
+
+SRC_PATH   = "railway_Clean_1_4.xlsx"
+SRC_SHEET  = "railway Clean 1.2"
+OUT_PATH   = "Railway_PivotAnalysis_15Q.xlsx"
+
+TIME_BANDS = [
+    (0, 5,  "🌙 Night (00-05)"),
+    (6, 9,  "🌅 Morning Peak (06-09)"),
+    (10, 15, "☀️ Midday (10-15)"),
+    (16, 19, "🌆 Evening Peak (16-19)"),
+    (20, 23, "🌃 Late Evening (20-23)"),
+]
+
+
+def load_data(path=SRC_PATH, sheet_name=SRC_SHEET) -> pd.DataFrame:
+    df = pd.read_excel(path, sheet_name=sheet_name)
+    df.columns = [c.strip() for c in df.columns]
+
+    df["Railcard"] = df["Railcard"].fillna("None")
+    df["Has Railcard"] = np.where(df["Railcard"] == "None", "No Railcard", "Has Railcard")
+    df["Reason for Delay"] = df["Reason for Delay"].fillna("N/A")
+    df["Time Delay(Minutes)"] = df["Time Delay(Minutes)"].fillna(0)
+
+    df["Departure Hour"] = pd.to_datetime(
+        df["Departure Time"].astype(str), format="%H:%M:%S", errors="coerce"
+    ).dt.hour
+    df["Route"] = df["Departure Station"] + " → " + df["Arrival Destination"]
+    df["Is Refund"] = df["Refund Request"].eq("Yes")
+
+    def band(h):
+        for lo, hi, label in TIME_BANDS:
+            if lo <= h <= hi:
+                return label
+        return "Unknown"
+    df["Time Band"] = df["Departure Hour"].apply(lambda h: band(h) if pd.notna(h) else "Unknown")
+
+    dop = df["Date of Purchase"]
+    doj = df["Date of Journey"]
+    lead_days = (doj - dop).dt.days
+    df["Lead Time"] = pd.cut(
+        lead_days, bins=[-1, 0, 3, 7, 30, 9999],
+        labels=["Same Day", "1-3 Days", "4-7 Days", "8-30 Days", "30+ Days"]
+    )
+
+    df["Price Tier"] = pd.cut(
+        df["Price"], bins=[-1, 20, 50, 100, 999999],
+        labels=["Budget (0-20)", "Mid (21-50)", "Premium (51-100)", "Luxury (100+)"]
+    )
+
+    month_period = doj.dt.to_period("M")
+    sorted_periods = sorted(month_period.dropna().unique())
+    month_labels = [p.strftime("%B %Y") for p in sorted_periods]
+    df["Month"] = pd.Categorical(
+        month_period.map(dict(zip(sorted_periods, month_labels))),
+        categories=month_labels, ordered=True
+    )
+    return df
+
+
+def start_sheet(wb, name, title, subtitle, ncols):
+    ws = wb.create_sheet(name)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=ncols)
+    ws["A1"], ws["A1"].font, ws["A1"].fill = title, TITLE_FONT, TITLE_FILL
+    ws["A2"], ws["A2"].font, ws["A2"].fill = subtitle, SUBTITLE_FONT, TITLE_FILL
+    return ws
+
+
+def write_table(ws, row, label, df):
+    """Writes one pivot block (bold label, header row, data rows).
+    Returns the next free row."""
+    ws.cell(row=row, column=1, value=f"Pivot - {label}").font = LABEL_FONT
+    header_row = row + 1
+    for j, col in enumerate(df.columns, start=1):
+        c = ws.cell(row=header_row, column=j, value=col)
+        c.font, c.fill = HEADER_FONT, HEADER_FILL
+        c.alignment = Alignment(horizontal="center")
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
+        for j, col in enumerate(df.columns, start=1):
+            ws.cell(row=header_row + i, column=j, value=r[col])
+    return header_row + len(df) + 2
+
+
+def write_note(ws, row, text, span=6):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=span)
+    ws.cell(row=row, column=1, value=text).font = NOTE_FONT
+    return row + 2
+
+
+def pct(n, d):
+    return round(100 * n / d, 1) if d else 0.0
+
+
+def status_breakdown(g, base, statuses=("On Time", "Delayed", "Cancelled")):
+    for s in statuses:
+        counts = base[base["Journey Status"] == s].groupby(g.index.name).size()
+        g[s] = g.index.map(counts).fillna(0).astype(int)
+    return g
+
+
+def q1(wb, df):
+    delayed = df[df["Journey Status"] == "Delayed"]
+    disrupted = df[df["Reason for Delay"] != "N/A"]
+
+    a = disrupted.groupby("Reason for Delay").agg(
+        Count=("Reason for Delay", "size"), Avg=("Time Delay(Minutes)", "mean")
+    )
+    a["% of Delayed"] = (a["Count"] / len(disrupted) * 100).round(1)
+    a["% of All Journeys"] = (a["Count"] / len(df) * 100).round(2)
+    a["Avg Delay (min)"] = a.pop("Avg").round(1)
+    a["Refund Rate %"] = (disrupted.groupby("Reason for Delay")["Is Refund"].mean() * 100).round(1)
+    a = a.reset_index().sort_values("Count", ascending=False)
+    a = a[["Reason for Delay", "Count", "% of Delayed", "% of All Journeys",
+           "Avg Delay (min)", "Refund Rate %"]]
+
+    reasons = a["Reason for Delay"].tolist()
+    b = delayed.pivot_table(index="Departure Station", columns="Reason for Delay",
+                             values="Transaction ID", aggfunc="count", fill_value=0)
+    b = b.reindex(columns=reasons, fill_value=0)
+    b["TOTAL"] = b.sum(axis=1)
+    totals = df.groupby("Departure Station").size()
+    b["Delay Rate %"] = (b["TOTAL"] / b.index.map(totals) * 100).round(1)
+    b = b.sort_values("TOTAL", ascending=False).reset_index()
+
+    routes = df.groupby("Route").agg(Total=("Route", "size"))
+    routes["Delayed"] = routes.index.map(delayed.groupby("Route").size()).fillna(0).astype(int)
+    routes["Delay Rate %"] = (routes["Delayed"] / routes["Total"] * 100).round(1)
+    routes["Avg Delay (min)"] = routes.index.map(
+        delayed.groupby("Route")["Time Delay(Minutes)"].mean()).fillna(0).round(1)
+    top_reason = delayed.groupby("Route")["Reason for Delay"].agg(
+        lambda s: s.value_counts().idxmax() if len(s) else "-")
+    routes["Top Delay Reason"] = routes.index.map(top_reason).fillna("-")
+    c = routes.sort_values("Delayed", ascending=False).head(20).reset_index()
+    c = c[["Route", "Total", "Delayed", "Delay Rate %", "Avg Delay (min)", "Top Delay Reason"]]
+
+    ws = start_sheet(wb, "Q1 Delay Reasons",
+                      "Q1 - Which Delay Reasons Disrupt Routes Most?",
+                      "Pivot: Delay Reason x Departure Station | Source: FactJourneys", 9)
+    r = write_table(ws, 4, "1A - Delay Reason Summary", a)
+    r = write_table(ws, r, "1B - Delay Reasons x Departure Station (Count of Delayed Trips)", b)
+    write_table(ws, r, "1C - Top 20 Routes by Delay Count & Top Reason", c)
+
+
+def _status_kpi(df, by):
+    g = df.groupby(by).agg(Total=(by, "size"))
+    g = status_breakdown(g, df)
+    g["On-Time %"] = (g["On Time"] / g["Total"] * 100).round(1)
+    g["Delay %"] = (g["Delayed"] / g["Total"] * 100).round(1)
+    g["Cancel %"] = (g["Cancelled"] / g["Total"] * 100).round(1)
+    g["Avg Delay (min)"] = df[df["Journey Status"] == "Delayed"].groupby(by)[
+        "Time Delay(Minutes)"].mean().reindex(g.index).fillna(0).round(2)
+    g["Refund Rate %"] = (df.groupby(by)["Is Refund"].mean() * 100).round(1)
+    g["Avg Price (£)"] = df.groupby(by)["Price"].mean().round(1)
+    g = g.reset_index()
+    return g[[by, "On Time", "Delayed", "Cancelled", "Total", "On-Time %",
+              "Delay %", "Cancel %", "Avg Delay (min)", "Refund Rate %", "Avg Price (£)"]]
+
+
+def q2(wb, df):
+    by_class = _status_kpi(df, "Ticket Class")
+    by_type = _status_kpi(df, "Ticket Type")
+    by_purchase = _status_kpi(df, "Purchase Type")
+    by_railcard = _status_kpi(df, "Has Railcard").rename(columns={"Has Railcard": "Railcard Status"})
+
+    cross = df.groupby(["Ticket Class", "Ticket Type"]).agg(
+        Total=("Price", "size"), Avg_Price=("Price", "mean"))
+    cross["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby(
+        ["Ticket Class", "Ticket Type"]).size().reindex(cross.index).fillna(0).astype(int)
+    cross["Delay %"] = (cross["Delayed"] / cross["Total"] * 100).round(1)
+    cross["Avg Price (£)"] = cross.pop("Avg_Price").round(1)
+    cross = cross.reset_index().sort_values("Delay %", ascending=False)
+    cross = cross[["Ticket Class", "Ticket Type", "Total", "Delayed", "Delay %", "Avg Price (£)"]]
+
+    ws = start_sheet(wb, "Q2 Ticket & Purchase",
+                      "Q2 - How Do Ticket Type & Purchase Method Affect Delays?",
+                      "Pivot: Journey Status x Ticket Class / Ticket Type / Purchase Type / Railcard", 11)
+    r = write_table(ws, 4, "Journey Performance by Ticket Class", by_class)
+    r = write_table(ws, r, "Journey Performance by Ticket Type", by_type)
+    r = write_table(ws, r, "Journey Performance by Purchase Type", by_purchase)
+    r = write_table(ws, r, "Journey Performance by Railcard Status", by_railcard)
+    write_table(ws, r, "Delay Rate by Ticket Class x Ticket Type (Cross-Tab)", cross)
+
+
+def q3(wb, df):
+    g = df.groupby("Departure Station").agg(Total=("Route", "size"))
+    g = status_breakdown(g, df)
+    g["Delay %"] = (g["Delayed"] / g["Total"] * 100).round(1)
+    g["Cancel %"] = (g["Cancelled"] / g["Total"] * 100).round(1)
+    g["Disruption %"] = (g["Delay %"] + g["Cancel %"]).round(1)
+    delayed = df[df["Journey Status"] == "Delayed"]
+    g["Avg Delay (min)"] = delayed.groupby("Departure Station")[
+        "Time Delay(Minutes)"].mean().reindex(g.index).fillna(0).round(2)
+    g["Total Delay Mins"] = delayed.groupby("Departure Station")[
+        "Time Delay(Minutes)"].sum().reindex(g.index).fillna(0).astype(int)
+
+    def norm(s):
+        return (s - s.min()) / (s.max() - s.min()) * 100 if s.max() > s.min() else s * 0
+    g["Pressure Score"] = (0.30 * norm(g["Total"]) + 0.35 * norm(g["Delay %"]) +
+                            0.20 * norm(g["Avg Delay (min)"]) + 0.15 * norm(g["Total Delay Mins"])).round(1)
+    g = g.sort_values("Pressure Score", ascending=False).reset_index()
+    g.insert(0, "Rank", range(1, len(g) + 1))
+
+    months = list(df["Month"].cat.categories)
+    monthly = delayed.pivot_table(index="Departure Station", columns="Month",
+                                   values="Transaction ID", aggfunc="count", fill_value=0)
+    monthly = monthly.reindex(columns=months, fill_value=0)
+    monthly["TOTAL"] = monthly.sum(axis=1)
+    monthly = monthly.reindex(g["Departure Station"]).reset_index()
+
+    ws = start_sheet(wb, "Q3 Station Pressure",
+                      "Q3 - Which Stations Face the Highest Operational Pressure?",
+                      "Pivot: Station KPIs + Composite Pressure Score | "
+                      "Score = 30% Volume + 35% Delay Rate + 20% Avg Delay + 15% Total Delay Mins", 12)
+    r = write_table(ws, 4, "3A - Station Operational Pressure Index", g)
+    r = write_table(ws, r, "3B - Delayed Trips by Station x Month", monthly)
+    small_n = g[(g["Total"] < 60) & (g["Delay %"] >= 90)]
+    if len(small_n):
+        write_note(ws, r, f"Warning: small sample size ({int(small_n.iloc[0]['Total'])} trips only) "
+                           f"for {small_n.iloc[0]['Departure Station']} - result not statistically reliable", span=12)
+
+
+def q4(wb, df):
+    order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    g = df.groupby("Journey Day").agg(Total=("Route", "size"))
+    g = status_breakdown(g, df)
+    g["Delay %"] = (g["Delayed"] / g["Total"] * 100).round(1)
+    g["Cancel %"] = (g["Cancelled"] / g["Total"] * 100).round(1)
+    g["Disruption %"] = (g["Delay %"] + g["Cancel %"]).round(1)
+    delayed = df[df["Journey Status"] == "Delayed"]
+    g["Avg Delay (min)"] = delayed.groupby("Journey Day")[
+        "Time Delay(Minutes)"].mean().reindex(g.index).fillna(0).round(2)
+    g = g.reindex(order).reset_index()
+    g = g[["Journey Day", "Total", "On Time", "Delayed", "Cancelled", "Delay %", "Cancel %",
+           "Disruption %", "Avg Delay (min)"]]
+
+    reasons = sorted(delayed["Reason for Delay"].unique())
+    b = delayed.pivot_table(index="Journey Day", columns="Reason for Delay",
+                             values="Transaction ID", aggfunc="count", fill_value=0)
+    b = b.reindex(index=order, columns=reasons, fill_value=0)
+    b["TOTAL"] = b.sum(axis=1)
+    b = b.reset_index()
+
+    hourly = df.groupby("Departure Hour").agg(Total=("Route", "size"))
+    hourly["Delayed"] = delayed.groupby("Departure Hour").size().reindex(hourly.index).fillna(0).astype(int)
+    hourly["Delay %"] = (hourly["Delayed"] / hourly["Total"] * 100).round(1)
+    hourly["Avg Delay (min)"] = delayed.groupby("Departure Hour")[
+        "Time Delay(Minutes)"].mean().reindex(hourly.index).fillna(0).round(2)
+    hourly["Period"] = hourly.index.map(
+        lambda h: next(lbl for lo, hi, lbl in TIME_BANDS if lo <= h <= hi))
+    hourly = hourly.reset_index().sort_values("Departure Hour")
+    hourly = hourly[["Departure Hour", "Period", "Total", "Delayed", "Delay %", "Avg Delay (min)"]]
+    hourly.columns = ["Hour", "Period", "Total", "Delayed", "Delay %", "Avg Delay (min)"]
+
+    ws = start_sheet(wb, "Q4 Day & Time Patterns",
+                      "Q4 - Are Certain Days & Hours More Vulnerable to Delays?",
+                      "Pivot: Journey Status x Day of Week | Delay Reasons x Day | Delay Rate by Hour", 10)
+    r = write_table(ws, 4, "4A - Journey Performance by Day of Week", g)
+    r = write_table(ws, r, "4B - Delay Reason Counts by Day of Week", b)
+    r = write_table(ws, r, "4C - Delay Rate by Departure Hour", hourly)
+
+    for i in range(1, len(hourly) - 1):
+        cur, nxt = hourly.iloc[i], hourly.iloc[i + 1]
+        if cur["Delay %"] == 0 and nxt["Delay %"] > 15:
+            write_note(ws, r, f"Check: hour {int(cur['Hour'])} at 0% delay vs hour "
+                               f"{int(nxt['Hour'])} at {nxt['Delay %']}% - recommend reviewing the data source", span=10)
+            break
+
+
+def q5(wb, df):
+    order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    a = df.pivot_table(index="Ticket Type", columns="Journey Day",
+                        values="Time Delay(Minutes)", aggfunc="mean", fill_value=0)
+    a = a.reindex(columns=order, fill_value=0).round(2)
+    a["Overall Avg"] = df.groupby("Ticket Type")["Time Delay(Minutes)"].mean().reindex(a.index).round(2)
+    a = a.reset_index()
+
+    b = df.groupby(["Departure Station", "Ticket Class"]).agg(Total=("Price", "size"))
+    b["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby(
+        ["Departure Station", "Ticket Class"]).size().reindex(b.index).fillna(0).astype(int)
+    b["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby(
+        ["Departure Station", "Ticket Class"]).size().reindex(b.index).fillna(0).astype(int)
+    b["Disruption %"] = ((b["Delayed"] + b["Cancelled"]) / b["Total"] * 100).round(1)
+    b = b.reset_index().sort_values("Disruption %", ascending=False)
+
+    c = df.groupby(["Purchase Type", "Ticket Type"]).agg(
+        Total=("Price", "size"), Avg_Price=("Price", "mean"))
+    c["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby(
+        ["Purchase Type", "Ticket Type"]).size().reindex(c.index).fillna(0).astype(int)
+    c["Delay %"] = (c["Delayed"] / c["Total"] * 100).round(1)
+    c["Avg Delay (min)"] = df[df["Journey Status"] == "Delayed"].groupby(
+        ["Purchase Type", "Ticket Type"])["Time Delay(Minutes)"].mean().reindex(c.index).fillna(0).round(2)
+    c["Avg Price (£)"] = c.pop("Avg_Price").round(1)
+    c = c.reset_index().sort_values("Delay %", ascending=False)
+    c = c[["Purchase Type", "Ticket Type", "Total", "Delay %", "Avg Delay (min)", "Avg Price (£)"]]
+
+    delayed = df[df["Journey Status"] == "Delayed"]
+    d = delayed.groupby("Reason for Delay").agg(
+        Total_Affected=("Reason for Delay", "size"), Avg_Delay=("Time Delay(Minutes)", "mean"))
+    d["Refunds"] = delayed.groupby("Reason for Delay")["Is Refund"].sum().reindex(d.index).fillna(0).astype(int)
+    d["Refund Rate %"] = (d["Refunds"] / d["Total_Affected"] * 100).round(1)
+    d["Avg Delay (min)"] = d.pop("Avg_Delay").round(1)
+    d = d.reset_index().rename(columns={"Total_Affected": "Total Affected"})
+    d = d[["Reason for Delay", "Total Affected", "Refunds", "Refund Rate %", "Avg Delay (min)"]]
+    d = d.sort_values("Refund Rate %", ascending=False)
+
+    ws = start_sheet(wb, "Q5 Operational Factors",
+                      "Q5 - Which Factor Combinations Drive Delays Most?",
+                      "Multi-variable Pivots: Ticket x Day | Station x Class | Purchase x Type | Delay Reason x Refund", 9)
+    r = write_table(ws, 4, "5A - Avg Delay (min) by Ticket Type x Journey Day", a)
+    r = write_table(ws, r, "5B - Disruption Rate by Station x Ticket Class", b)
+    r = write_table(ws, r, "5C - Delay Rate by Purchase Type x Ticket Type", c)
+    write_table(ws, r, "5D - Refund Rate & Avg Delay by Delay Reason", d)
+
+
+def q6(wb, df):
+    g = df.groupby("Route").agg(Total=("Route", "size"))
+    g["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby("Route").size().reindex(g.index).fillna(0).astype(int)
+    g["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby("Route").size().reindex(g.index).fillna(0).astype(int)
+    g["Delay %"] = (g["Delayed"] / g["Total"] * 100).round(1)
+    g["Cancel %"] = (g["Cancelled"] / g["Total"] * 100).round(1)
+    g["Disruption %"] = (g["Delay %"] + g["Cancel %"]).round(1)
+    delayed = df[df["Journey Status"] == "Delayed"]
+    g["Avg Delay (min)"] = delayed.groupby("Route")["Time Delay(Minutes)"].mean().reindex(g.index).fillna(0).round(1)
+    top_reason = delayed.groupby("Route")["Reason for Delay"].agg(
+        lambda s: s.value_counts().idxmax() if len(s) else "-")
+    g["Top Delay Reason"] = g.index.map(top_reason).fillna("-")
+
+    def norm(s):
+        return (s - s.min()) / (s.max() - s.min()) * 100 if s.max() > s.min() else s * 0
+    g["Vuln Score"] = (0.40 * norm(g["Delay %"]) + 0.30 * norm(g["Cancel %"]) +
+                        0.20 * norm(g["Avg Delay (min)"]) + 0.10 * norm(g["Total"])).round(1)
+
+    g = g[g["Total"] >= 50].sort_values("Vuln Score", ascending=False).head(30).reset_index()
+    g.insert(0, "Rank", range(1, len(g) + 1))
+    g = g[["Rank", "Route", "Total", "Delayed", "Cancelled", "Delay %", "Cancel %",
+           "Disruption %", "Avg Delay (min)", "Top Delay Reason", "Vuln Score"]]
+
+    s = df.groupby("Departure Station").agg(
+        Unique_Routes=("Route", "nunique"), Total=("Route", "size"))
+    s["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby(
+        "Departure Station").size().reindex(s.index).fillna(0).astype(int)
+    s["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby(
+        "Departure Station").size().reindex(s.index).fillna(0).astype(int)
+    s["Disruption %"] = ((s["Delayed"] + s["Cancelled"]) / s["Total"] * 100).round(1)
+    s = s.reset_index().rename(columns={"Unique_Routes": "Unique Routes"}).sort_values(
+        "Disruption %", ascending=False)
+
+    ws = start_sheet(wb, "Q6 Route Vulnerability",
+                      "Q6 - Which Routes Are Most Vulnerable to Disruptions?",
+                      "Pivot: Route KPIs + Vulnerability Score (>=50 journeys) | "
+                      "Score = 40% Delay Rate + 30% Cancel Rate + 20% Avg Delay + 10% Volume", 11)
+    r = write_table(ws, 4, "6A - Route Vulnerability Ranking (Top 30, min 50 journeys)", g)
+    r = write_table(ws, r, "6B - Disruption by Departure Station (All Routes)", s)
+    write_note(ws, r, "Top 5 = most vulnerable | Rank 6-10 = medium | Rank 11-20 = lower | "
+                       "Vuln Score = 40% Delay Rate + 30% Cancel Rate + 20% Avg Delay + 10% Volume", span=11)
+
+
+def q7(wb, df):
+    a = df.groupby("Arrival Destination").agg(
+        Total_Revenue=("Price", "sum"), Total_Trips=("Price", "size"), Avg_Price=("Price", "mean"))
+    a["Revenue Share %"] = (a["Total_Revenue"] / a["Total_Revenue"].sum() * 100).round(1)
+    a = a.sort_values("Total_Revenue", ascending=False).head(10).reset_index()
+    a.insert(len(a.columns), "Rank", range(1, len(a) + 1))
+    a["Total_Revenue"] = a["Total_Revenue"].round(0).astype(int)
+    a["Avg_Price"] = a["Avg_Price"].round(1)
+    a.columns = ["Arrival Destination", "Total Revenue (£)", "Total Trips", "Avg Price (£)",
+                 "Revenue Share %", "Rank"]
+
+    b = df.groupby(["Ticket Class", "Ticket Type"]).agg(
+        Total=("Price", "size"), Avg=("Price", "mean"), Max=("Price", "max"), Min=("Price", "min"))
+    b = b.reset_index().sort_values("Avg", ascending=False)
+    b.columns = ["Ticket Class", "Ticket Type", "Total Trips", "Avg Price (£)", "Max Price (£)", "Min Price (£)"]
+
+    c = df.groupby("Price Tier", observed=True).agg(Total=("Price", "size"))
+    c["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby(
+        "Price Tier", observed=True).size().reindex(c.index).fillna(0).astype(int)
+    c["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby(
+        "Price Tier", observed=True).size().reindex(c.index).fillna(0).astype(int)
+    c["Delay %"] = (c["Delayed"] / c["Total"] * 100).round(1)
+    c["Refund %"] = (df.groupby("Price Tier", observed=True)["Is Refund"].mean() * 100).round(1)
+    c = c.reset_index()
+
+    ws = start_sheet(wb, "Q7 Revenue by Route",
+                      "Q7 - Which Routes Generate the Most Revenue & What Are the Price Patterns?",
+                      "Pivot: Revenue x Destination | Ticket Class x Avg Price | Price Tier Distribution", 6)
+    r = write_table(ws, 4, "7A - Top Destinations by Total Revenue", a)
+    r = write_table(ws, r, "7B - Avg Price by Ticket Class x Ticket Type", b)
+    write_table(ws, r, "7C - Journey Performance by Price Tier", c)
+
+
+def q8(wb, df):
+    a = df.groupby("Payment Method").agg(Total_Trips=("Price", "size"))
+    a["On Time"] = df[df["Journey Status"] == "On Time"].groupby("Payment Method").size().reindex(a.index).fillna(0).astype(int)
+    a["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby("Payment Method").size().reindex(a.index).fillna(0).astype(int)
+    a["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby("Payment Method").size().reindex(a.index).fillna(0).astype(int)
+    a["Delay %"] = (a["Delayed"] / a["Total_Trips"] * 100).round(1)
+    a["Cancel %"] = (a["Cancelled"] / a["Total_Trips"] * 100).round(1)
+    a["Avg Price (£)"] = df.groupby("Payment Method")["Price"].mean().round(1)
+    a = a.reset_index().rename(columns={"Total_Trips": "Total Trips"})
+    a = a[["Payment Method", "Total Trips", "On Time", "Delayed", "Cancelled", "Delay %",
+           "Cancel %", "Avg Price (£)"]]
+
+    ref = df[df["Is Refund"]]
+    b = ref.groupby("Payment Method").agg(Total_Refunds=("Price", "size"), Avg_Refund_Price=("Price", "mean"))
+    b["Refund Rate %"] = (b["Total_Refunds"] / df.groupby("Payment Method").size().reindex(b.index) * 100).round(1)
+    b["Refunds – Delayed"] = ref[ref["Journey Status"] == "Delayed"].groupby(
+        "Payment Method").size().reindex(b.index).fillna(0).astype(int)
+    b["Refunds – Cancelled"] = ref[ref["Journey Status"] == "Cancelled"].groupby(
+        "Payment Method").size().reindex(b.index).fillna(0).astype(int)
+    b["Avg Refund Price (£)"] = b.pop("Avg_Refund_Price").round(1)
+    b = b.reset_index().rename(columns={"Total_Refunds": "Total Refunds"})
+    b = b[["Payment Method", "Total Refunds", "Refund Rate %", "Refunds – Delayed",
+           "Refunds – Cancelled", "Avg Refund Price (£)"]]
+
+    ws = start_sheet(wb, "Q8 Payment Method",
+                      "Q8 - Does Payment Method Influence Journey Delays & Refunds?",
+                      "Pivot: Journey Status x Payment Method | Refund Rate x Payment | Avg Price x Method", 8)
+    r = write_table(ws, 4, "8A - Journey Performance by Payment Method", a)
+    write_table(ws, r, "8B - Refund Rate by Payment Method x Journey Status", b)
+
+
+def q9(wb, df):
+    months = list(df["Month"].cat.categories)
+    a = df.groupby("Month").agg(Total_Trips=("Price", "size"), Revenue=("Price", "sum"))
+    a["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby("Month").size().reindex(a.index).fillna(0).astype(int)
+    a["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby("Month").size().reindex(a.index).fillna(0).astype(int)
+    a["Delay %"] = (a["Delayed"] / a["Total_Trips"] * 100).round(1)
+    a["Cancel %"] = (a["Cancelled"] / a["Total_Trips"] * 100).round(1)
+    a["Disruption %"] = (a["Delay %"] + a["Cancel %"]).round(1)
+    a["Revenue"] = a["Revenue"].round(0).astype(int)
+    a = a.reindex(months).reset_index().rename(columns={"Total_Trips": "Total Trips", "Revenue": "Revenue (£)"})
+
+    delayed = df[df["Journey Status"] == "Delayed"]
+    reasons = sorted(delayed["Reason for Delay"].unique())
+    b = delayed.pivot_table(index="Month", columns="Reason for Delay",
+                             values="Transaction ID", aggfunc="count", fill_value=0)
+    b = b.reindex(index=months, columns=reasons, fill_value=0)
+    b["TOTAL"] = b.sum(axis=1)
+    b = b.reset_index()
+
+    ws = start_sheet(wb, "Q9 Monthly Trend",
+                      "Q9 - How Does Railway Performance Change Month by Month?",
+                      "Pivot: Monthly Revenue & Volume | Delay/Cancel Rate by Month | "
+                      "Delay Reason Distribution by Month", 8)
+    r = write_table(ws, 4, "9A - Monthly Journey Volume, Revenue & Disruption Rate", a)
+    write_table(ws, r, "9B - Delay Reason Count by Month", b)
+
+
+def q10(wb, df):
+    tmp = df.copy()
+    tmp["Railcard Type"] = tmp["Railcard"].where(tmp["Railcard"] != "None", "No Railcard")
+
+    a = tmp.groupby("Railcard Type").agg(Total_Trips=("Price", "size"))
+    a["On Time"] = tmp[tmp["Journey Status"] == "On Time"].groupby("Railcard Type").size().reindex(a.index).fillna(0).astype(int)
+    a["Delayed"] = tmp[tmp["Journey Status"] == "Delayed"].groupby("Railcard Type").size().reindex(a.index).fillna(0).astype(int)
+    a["Cancelled"] = tmp[tmp["Journey Status"] == "Cancelled"].groupby("Railcard Type").size().reindex(a.index).fillna(0).astype(int)
+    a["Delay %"] = (a["Delayed"] / a["Total_Trips"] * 100).round(1)
+    a["Refund %"] = (tmp.groupby("Railcard Type")["Is Refund"].mean() * 100).round(1)
+    a["Avg Price (£)"] = tmp.groupby("Railcard Type")["Price"].mean().round(1)
+    a = a.sort_values("Total_Trips", ascending=False).reset_index().rename(columns={"Total_Trips": "Total Trips"})
+
+    b = tmp.groupby(["Railcard Type", "Ticket Class"]).agg(Total=("Price", "size"), Avg_Price=("Price", "mean"))
+    b["Delay %"] = (tmp[tmp["Journey Status"] == "Delayed"].groupby(
+        ["Railcard Type", "Ticket Class"]).size().reindex(b.index).fillna(0) / b["Total"] * 100).round(1)
+    b["Refund %"] = (tmp.groupby(["Railcard Type", "Ticket Class"])["Is Refund"].mean() * 100).round(1)
+    b["Avg Price (£)"] = b.pop("Avg_Price").round(1)
+    b = b.reset_index()
+
+    ws = start_sheet(wb, "Q10 Railcard Analysis",
+                      "Q10 - Do Railcard Holders Experience Different Journey Outcomes?",
+                      "Pivot: Railcard Type x Journey Status | Avg Price | Delay & Refund Rate Comparison", 8)
+    r = write_table(ws, 4, "10A - Journey Performance by Railcard Type", a)
+    write_table(ws, r, "10B - Railcard Type x Ticket Class Cross-Tab", b)
+
+
+def q11(wb, df):
+    a = df.groupby("Arrival Destination").agg(Total_Trips=("Price", "size"))
+    a["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby(
+        "Arrival Destination").size().reindex(a.index).fillna(0).astype(int)
+    a["Cancel %"] = (a["Cancelled"] / a["Total_Trips"] * 100).round(1)
+    cancelled = df[df["Journey Status"] == "Cancelled"]
+    a["Refund Requests"] = cancelled[cancelled["Is Refund"]].groupby(
+        "Arrival Destination").size().reindex(a.index).fillna(0).astype(int)
+    a["Refund Rate %"] = (a["Refund Requests"] / a["Cancelled"].replace(0, np.nan) * 100).round(1).fillna(0)
+    a = a.sort_values("Cancel %", ascending=False).reset_index().rename(columns={"Total_Trips": "Total Trips"})
+
+    b = df.groupby(["Ticket Type", "Ticket Class"]).agg(Total_Trips=("Price", "size"))
+    b["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby(
+        ["Ticket Type", "Ticket Class"]).size().reindex(b.index).fillna(0).astype(int)
+    b["Cancel %"] = (b["Cancelled"] / b["Total_Trips"] * 100).round(1)
+    b["Refund Rate %"] = (df.groupby(["Ticket Type", "Ticket Class"])["Is Refund"].mean() * 100).round(1)
+    b = b.reset_index().rename(columns={"Total_Trips": "Total Trips"})
+
+    ws = start_sheet(wb, "Q11 Cancellations",
+                      "Q11 - Where & Why Do Cancellations Happen Most?",
+                      "Pivot: Cancellations by Destination | Cancellations by Ticket Type | Cancelled x Refund", 6)
+    r = write_table(ws, 4, "11A - Cancellation Rate by Arrival Destination", a)
+    write_table(ws, r, "11B - Cancellations by Ticket Type & Class", b)
+
+
+def q12(wb, df):
+    delayed = df[df["Journey Status"] == "Delayed"]
+    reasons = sorted(delayed["Reason for Delay"].unique())
+    a = delayed.pivot_table(index="Departure Hour", columns="Reason for Delay",
+                             values="Transaction ID", aggfunc="count", fill_value=0)
+    a = a.reindex(columns=reasons, fill_value=0)
+    a["Period"] = a.index.map(lambda h: next(lbl for lo, hi, lbl in TIME_BANDS if lo <= h <= hi) if pd.notna(h) else "-")
+    a = a.reset_index().rename(columns={"Departure Hour": "Hour"})
+    a = a[["Hour", "Period"] + reasons]
+
+    b = delayed.groupby("Time Band").agg(Total_Delayed=("Transaction ID", "size"))
+    totals_band = df.groupby("Time Band").size()
+    b["Delay Rate %"] = (b["Total_Delayed"] / b.index.map(totals_band) * 100).round(1)
+    dominant = delayed.groupby("Time Band")["Reason for Delay"].agg(
+        lambda s: s.value_counts().idxmax() if len(s) else "-")
+    counts = delayed.groupby(["Time Band", "Reason for Delay"]).size()
+    b["Dominant Reason"] = b.index.map(dominant).fillna("-")
+    b["Count"] = [counts.get((band, dom), 0) for band, dom in zip(b.index, b["Dominant Reason"])]
+    b["Avg Delay (min)"] = delayed.groupby("Time Band")["Time Delay(Minutes)"].mean().reindex(b.index).fillna(0).round(1)
+    order = [lbl for _, _, lbl in TIME_BANDS]
+    b = b.reindex(order).reset_index().rename(columns={"index": "Time Band", "Total_Delayed": "Total Delayed"})
+
+    ws = start_sheet(wb, "Q12 Hour x Delay Reason",
+                      "Q12 - Which Hours Cluster with Which Delay Reasons?",
+                      "Pivot: Delay Reason x Departure Hour | Delay Count Heatmap by Time Band", 8)
+    r = write_table(ws, 4, "12A - Delay Reason Count by Hour", a)
+    write_table(ws, r, "12B - Total Delays by Time Band", b)
+
+
+def q13(wb, df):
+    order = ["Same Day", "1-3 Days", "4-7 Days", "8-30 Days", "30+ Days"]
+    a = df.groupby("Lead Time", observed=True).agg(Total_Trips=("Price", "size"))
+    a["Delayed"] = df[df["Journey Status"] == "Delayed"].groupby(
+        "Lead Time", observed=True).size().reindex(a.index).fillna(0).astype(int)
+    a["Cancelled"] = df[df["Journey Status"] == "Cancelled"].groupby(
+        "Lead Time", observed=True).size().reindex(a.index).fillna(0).astype(int)
+    a["Delay %"] = (a["Delayed"] / a["Total_Trips"] * 100).round(1)
+    a["Avg Price (£)"] = df.groupby("Lead Time", observed=True)["Price"].mean().round(1)
+    a["Refund %"] = (df.groupby("Lead Time", observed=True)["Is Refund"].mean() * 100).round(1)
+    a = a.reindex(order).dropna(how="all").reset_index().rename(columns={"Total_Trips": "Total Trips"})
+
+    b = df.pivot_table(index="Lead Time", columns="Ticket Type", values="Price",
+                        aggfunc="mean", observed=True, fill_value=0).round(1)
+    b = b.reindex(order).dropna(how="all")
+    numeric_cols = list(b.columns)
+    b["Cheapest Type"] = b[numeric_cols].idxmin(axis=1)
+    if "Same Day" in b.index:
+        same_day_avg = b.loc["Same Day", numeric_cols].mean()
+        b["Price Saving vs Same Day (£)"] = (same_day_avg - b[numeric_cols].mean(axis=1)).round(1)
+    b = b.reset_index()
+
+    ws = start_sheet(wb, "Q13 Purchase Lead Time",
+                      "Q13 - Does Booking in Advance Affect Price, Delays & Refunds?",
+                      "Pivot: Lead Time Group x Journey Outcome | Avg Price by Lead Time | "
+                      "Refund Behaviour by Booking Window", 7)
+    r = write_table(ws, 4, "13A - Journey Performance by Purchase Lead Time", a)
+    same_day_delay = a[a["Lead Time"] == "Same Day"]["Delay %"].values
+    other_delay = a[a["Lead Time"] != "Same Day"]["Delay %"].min() if len(a) > 1 else None
+    if len(same_day_delay) and other_delay is not None:
+        r = write_note(ws, r,
+            f"Note: the delay-rate gap between booking same-day ({same_day_delay[0]}%) "
+            f"and booking ahead ({other_delay}%) is fairly small, suggesting booking "
+            f"lead time doesn't strongly affect delay risk. Price is the more useful angle.", span=7)
+    write_table(ws, r, "13B - Avg Price by Ticket Type x Lead Time", b)
+
+
+def q14(wb, df):
+    a = df.groupby("Journey Status").agg(Total_Trips=("Price", "size"))
+    a["Refunds"] = df[df["Is Refund"]].groupby("Journey Status").size().reindex(a.index).fillna(0).astype(int)
+    a["Refund Rate %"] = (a["Refunds"] / a["Total_Trips"] * 100).round(1)
+    a["Avg Delay (min)"] = df[df["Journey Status"] == "Delayed"].groupby(
+        "Journey Status")["Time Delay(Minutes)"].mean().reindex(a.index).fillna(0).round(1)
+    a["Avg Ticket Price (£)"] = df.groupby("Journey Status")["Price"].mean().round(1)
+    total_refunds = a["Refunds"].sum()
+    a["% of All Refunds"] = (a["Refunds"] / total_refunds * 100).round(1) if total_refunds else 0
+    a = a.reset_index().rename(columns={"Total_Trips": "Total Trips"})
+
+    delayed = df[df["Journey Status"] == "Delayed"]
+    b = delayed.groupby("Reason for Delay").agg(Total_Affected=("Price", "size"), Avg_Price=("Price", "mean"))
+    b["Refunds"] = delayed[delayed["Is Refund"]].groupby(
+        "Reason for Delay").size().reindex(b.index).fillna(0).astype(int)
+    b["Refund Rate %"] = (b["Refunds"] / b["Total_Affected"] * 100).round(1)
+    b["Avg Delay (min)"] = delayed.groupby("Reason for Delay")["Time Delay(Minutes)"].mean().reindex(b.index).round(1)
+    b["Avg Price (£)"] = b.pop("Avg_Price").round(1)
+    b = b.sort_values("Refund Rate %", ascending=False).reset_index().rename(columns={"Total_Affected": "Total Affected"})
+    b.insert(len(b.columns), "Rank by Refund Rate", range(1, len(b) + 1))
+
+    c = df.groupby(["Ticket Class", "Has Railcard"]).agg(Total=("Price", "size"), Avg_Price=("Price", "mean"))
+    c["Refunds"] = df[df["Is Refund"]].groupby(
+        ["Ticket Class", "Has Railcard"]).size().reindex(c.index).fillna(0).astype(int)
+    c["Refund %"] = (c["Refunds"] / c["Total"] * 100).round(1)
+    c["Avg Price (£)"] = c.pop("Avg_Price").round(1)
+    c = c.reset_index().rename(columns={"Has Railcard": "Railcard Status"})
+
+    ws = start_sheet(wb, "Q14 Refund Analysis",
+                      "Q14 - What Drives Refund Requests & Which Passengers Claim Most?",
+                      "Pivot: Refund by Journey Status | Refund by Delay Reason | "
+                      "Refund by Ticket Class & Railcard", 7)
+    r = write_table(ws, 4, "14A - Refund Requests by Journey Status", a)
+    r = write_table(ws, r, "14B - Refund Rate by Delay Reason", b)
+    write_table(ws, r, "14C - Refund Rate by Ticket Class x Railcard Status", c)
+
+
+def q15(wb, df):
+    total = len(df)
+    delayed = df[df["Journey Status"] == "Delayed"]
+    cancelled = df[df["Journey Status"] == "Cancelled"]
+    on_time = df[df["Journey Status"] == "On Time"]
+    refunds = df[df["Is Refund"]]
+
+    def delay_rate_by(col):
+        tot = df.groupby(col).size()
+        dly = delayed.groupby(col).size().reindex(tot.index).fillna(0)
+        return (dly / tot * 100).round(1)
+
+    reason_share = (delayed["Reason for Delay"].value_counts(normalize=True) * 100).round(1)
+    station_delay = delay_rate_by("Departure Station")
+    route_sizes = df.groupby("Route").size()
+    route_delay_all = delay_rate_by("Route")
+    route_delay = route_delay_all[route_sizes.reindex(route_delay_all.index) >= 50]
+    busiest = df["Departure Station"].value_counts().idxmax()
+    dest_rev_series = df.groupby("Arrival Destination")["Price"].sum()
+    dest_rev = dest_rev_series.idxmax()
+    hour_delay = delay_rate_by("Departure Hour").dropna()
+    day_delay = delay_rate_by("Journey Day")
+
+    rows = [
+        ("Total Journeys", f"{total:,}", ""),
+        ("Total Revenue (£)", f"{df['Price'].sum():,.0f}", ""),
+        ("On-Time Journeys", f"{len(on_time):,}", f"{pct(len(on_time), total)}%"),
+        ("Delayed Journeys", f"{len(delayed):,}", f"{pct(len(delayed), total)}%"),
+        ("Cancelled Journeys", f"{len(cancelled):,}", f"{pct(len(cancelled), total)}%"),
+        ("Total Refund Requests", f"{len(refunds):,}", f"{pct(len(refunds), total)}%"),
+        ("Avg Delay (Delayed Only)", f"{delayed['Time Delay(Minutes)'].mean():.1f} min", ""),
+        ("Total Delay Minutes", f"{delayed['Time Delay(Minutes)'].sum():,.0f}", ""),
+        ("Most Common Delay Reason", f"{reason_share.idxmax()} ({reason_share.max()}%)", ""),
+        ("Highest Pressure Station", f"{station_delay.idxmax()} ({station_delay.max():.0f}% delay rate)", ""),
+        ("Most Vulnerable Route", f"{route_delay.idxmax()} ({route_delay.max():.1f}%)", ""),
+        ("Busiest Departure Station", f"{busiest} ({df['Departure Station'].value_counts().max():,} trips)", ""),
+        ("Highest Revenue Dest.", f"{dest_rev} (£{dest_rev_series.max():,.0f})", ""),
+        ("Peak Delay Hour", f"{int(hour_delay.idxmax()):02d}:00 ({hour_delay.max():.1f}% delay rate)", ""),
+        ("Best On-Time Day", f"{day_delay.idxmin()} ({100 - day_delay.min():.1f}% on time)", ""),
+        ("Worst Delay Day", f"{day_delay.idxmax()} ({day_delay.max():.1f}% delay rate)", ""),
+    ]
+    kpis = pd.DataFrame(rows, columns=["KPI", "Value", "Extra"])
+
+    ws = start_sheet(wb, "Q15 KPI Summary",
+                      "Q15 - What Is the Overall KPI Scorecard Across All Dimensions?",
+                      "Master Summary: Volume | Revenue | Delay | Cancellation | Refund | Worst & Best Performers", 7)
+    write_table(ws, 4, "15A - Top-Level Network KPIs", kpis)
+
+
+def main():
+    df = load_data()
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    data_ws = wb.create_sheet("Data")
+    data_ws["A1"] = "Railway Dataset - Cleaned Fact Table"
+    data_ws["A2"] = f"Source data used for all Pivot Tables below | {len(df):,} rows"
+    helper_cols = {"Departure Hour", "Route", "Is Refund", "Time Band", "Lead Time", "Price Tier", "Month"}
+    cols = [c for c in df.columns if c not in helper_cols]
+    for j, col in enumerate(cols, start=1):
+        data_ws.cell(row=3, column=j, value=col).font = HEADER_FONT
+    for i, (_, row) in enumerate(df[cols].iterrows(), start=4):
+        for j, val in enumerate(row, start=1):
+            data_ws.cell(row=i, column=j, value=val)
+
+    for fn in (q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12, q13, q14, q15):
+        fn(wb, df)
+
+    wb.save(OUT_PATH)
+    print(f"Saved {OUT_PATH}")
+
+
+if __name__ == "__main__":
+    main()
