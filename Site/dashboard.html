@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Dashboard | UK Railway Analytics</title>
+
+<link rel="stylesheet" href="css/style.css">
+
+<link href="https://cdn.jsdelivr.net/npm/remixicon/fonts/remixicon.css" rel="stylesheet">
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+</head>
+
+<body>
+
+<!-- ================= NAVBAR ================= -->
+
+<nav class="navbar">
+
+<div class="logo">
+
+<i class="ri-train-fill"></i>
+
+<span>UK Railway Analytics</span>
+
+</div>
+
+<ul class="nav-links">
+
+<li><a href="index.html">Home</a></li>
+
+<li><a href="dashboard.html" class="active">Dashboard</a></li>
+
+<li><a href="analytics.html">Analytics</a></li>
+
+<li><a href="ai.html">AI Prediction</a></li>
+
+<li><a href="team.html">Team</a></li>
+
+<li><a href="contact.html">Contact</a></li>
+
+</ul>
+
+<a href="index.html" class="nav-btn">
+
+Back Home
+
+</a>
+
+</nav>
+
+<!-- ================= HERO ================= -->
+
+<section class="hero">
+
+<div class="hero-content">
+
+<span class="badge">
+
+📊 Power BI Dashboards
+
+</span>
+
+<h1>
+
+Interactive Dashboard Gallery
+
+</h1>
+
+<p>
+
+Explore all Power BI dashboards developed for the UK Railway Analytics Platform.
+Click any dashboard to view it in full size.
+
+</p>
+
+</div>
+
+</section>
+
+<!-- ================= DASHBOARD GALLERY ================= -->
+
+<section class="gallery">
+
+<div class="section-title">
+
+<h2>Power BI Dashboard Gallery</h2>
+
+<p>
+
+Business Intelligence dashboards for railway performance analysis.
+
+</p>
+
+</div>
+
+<div class="gallery-grid">
+
+<!-- Dashboard 1 -->
+
+<div class="gallery-card">
+
+<img src="assets/dashboard/overview.png"
+onclick="openImage(this.src)">
+
+<div class="overlay">
+
+<h3>Overview Dashboard</h3>
+
+<p>Click to View</p>
+
+</div>
+
+</div>
+
+<!-- Dashboard 2 -->
+
+<div class="gallery-card">
+
+<img src="assets/dashboard/revenue.png"
+onclick="openImage(this.src)">
+
+<div class="overlay">
+
+<h3>Revenue Dashboard</h3>
+
+<p>Click to View</p>
+
+</div>
+
+</div>
+
+<!-- Dashboard 3 -->
+
+<div class="gallery-card">
+
+<img src="assets/dashboard/delay.png"
+onclick="openImage(this.src)">
+
+<div class="overlay">
+
+<h3>Delay Dashboard</h3>
+
+<p>Click to View</p>
+
+</div>
+
+</div>
+<!-- Dashboard 4 -->
+
+<div class="gallery-card">
+
+<img src="assets/dashboard/operations.png"
+onclick="openImage(this.src)">
+
+<div class="overlay">
+
+<h3>Operations Dashboard</h3>
+
+<p>Click to View</p>
+
+</div>
+
+</div>
+
+<!-- Dashboard 5 -->
+
+<div class="gallery-card">
+
+<img src="assets/dashboard/stations.png"
+onclick="openImage(this.src)">
+
+<div class="overlay">
+
+<h3>Stations Performance</h3>
+
+<p>Click to View</p>
+
+</div>
+
+</div>
+
+<!-- Dashboard 6 -->
+
+<div class="gallery-card">
+
+<img src="assets/dashboard/technical.png"
+onclick="openImage(this.src)">
+
+<div class="overlay">
+
+<h3>Technical Dashboard</h3>
+
+<p>Click to View</p>
+
+</div>
+
+</div>
+
+</div>
+
+</section>
+
+<!-- ================= PROJECT SUMMARY ================= -->
+
+<section class="about">
+
+<div class="section-title">
+
+<h2>Dashboard Overview</h2>
+
+<p>What do these dashboards provide?</p>
+
+</div>
+
+<div class="feature-grid">
+
+<div class="feature-card">
+
+<i class="ri-line-chart-line"></i>
+
+<h3>Performance Monitoring</h3>
+
+<p>Track railway performance using KPIs and visual reports.</p>
+
+</div>
+
+<div class="feature-card">
+
+<i class="ri-time-line"></i>
+
+<h3>Delay Analysis</h3>
+
+<p>Understand delay causes and identify operational issues.</p>
+
+</div>
+
+<div class="feature-card">
+
+<i class="ri-money-dollar-circle-line"></i>
+
+<h3>Revenue Insights</h3>
+
+<p>Analyze ticket sales, revenue and business growth.</p>
+
+</div>
+
+<div class="feature-card">
+
+<i class="ri-map-pin-line"></i>
+
+<h3>Station Performance</h3>
+
+<p>Compare stations based on activity and efficiency.</p>
+
+</div>
+
+</div>
+
+</section>
+
+<!-- ================= IMAGE POPUP ================= -->
+
+<div id="popup" class="popup">
+
+<span class="close" onclick="closeImage()">&times;</span>
+
+<img id="popup-img">
+
+</div>
+
+<!-- ================= FOOTER ================= -->
+
+<footer>
+
+<div class="footer-container">
+
+<div>
+
+<h2>UK Railway Analytics</h2>
+
+<p>
+
+AI & Data Analytics Graduation Project
+
+</p>
+
+</div>
+
+<div>
+
+<h3>Quick Links</h3>
+
+<ul>
+
+<li><a href="index.html">Home</a></li>
+
+<li><a href="analytics.html">Analytics</a></li>
+
+<li><a href="ai.html">AI Prediction</a></li>
+
+<li><a href="team.html">Team</a></li>
+
+</ul>
+
+</div>
+
+<div>
+
+<h3>Project</h3>
+
+<p>Faculty of Industrial & Energy Technology</p>
+
+<p>Graduation Project 2026</p>
+
+</div>
+
+</div>
+
+<hr>
+
+<p class="copyright">
+
+© 2026 UK Railway Analytics | Team 6
+
+</p>
+
+</footer>
+<!-- ================= JAVASCRIPT ================= -->
+
+<script>
+
+function openImage(src){
+
+document.getElementById("popup").style.display="flex";
+
+document.getElementById("popup-img").src=src;
+
+document.body.style.overflow="hidden";
+
+}
+
+function closeImage(){
+
+document.getElementById("popup").style.display="none";
+
+document.body.style.overflow="auto";
+
+}
+
+// إغلاق الـ Popup عند الضغط خارج الصورة
+
+document.getElementById("popup").addEventListener("click",function(e){
+
+if(e.target.id==="popup"){
+
+closeImage();
+
+}
+
+});
+
+// إغلاق بالزر ESC
+
+document.addEventListener("keydown",function(e){
+
+if(e.key==="Escape"){
+
+closeImage();
+
+}
+
+});
+
+</script>
+
+<script src="js/main.js"></script>
+
+</body>
+
+</html>
